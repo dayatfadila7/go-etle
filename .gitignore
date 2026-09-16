@@ -1,0 +1,7 @@
+.env
+node_modules/
+go-etle
+fe/node_modules/
+*.exe
+*.test
+*.out

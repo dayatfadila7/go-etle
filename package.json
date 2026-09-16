@@ -1,0 +1,16 @@
+{
+  "name": "go-etle",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "concurrently -n go,bff,fe -c green,cyan,blue \"go run .\" \"npm --prefix bff start\" \"npm --prefix fe run dev\"",
+    "dev:be": "concurrently -n go,bff -c green,cyan \"go run .\" \"npm --prefix bff start\"",
+    "dev:fe": "npm --prefix fe run dev",
+    "install:all": "npm --prefix bff install --legacy-peer-deps && npm --prefix fe install --legacy-peer-deps",
+    "build:fe": "npm --prefix fe run build",
+    "seed": "go run . seed && npm --prefix bff run seed:admin"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
