@@ -60,6 +60,7 @@ type Violation struct {
 	Attempts        int       `json:"attempts"`
 	ErrorMessage    string    `json:"error_message"`
 	CreatedAt       time.Time `json:"created_at"`
+	SentAt          *time.Time `json:"sent_at,omitempty"`
 }
 
 type ViolationItem struct {
@@ -83,6 +84,15 @@ type ViolationPayload struct {
 
 type SendResponse struct {
 	Status int `json:"status"`
+}
+
+// ViolationDetail = detail pelanggaran lengkap dengan nama client & kamera.
+type ViolationDetail struct {
+	Violation
+	ClientName string `json:"client_name"`
+	ClientCode string `json:"client_code"`
+	CameraName string `json:"camera_name"`
+	CameraCode string `json:"camera_code"`
 }
 
 type User struct {

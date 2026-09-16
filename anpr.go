@@ -86,6 +86,12 @@ func ParseANPRFilename(filename string) ParsedANPRMeta {
 		meta.CameraCode = strings.TrimSpace(parts[0])
 		meta.DeviceName = strings.TrimSpace(parts[0])
 		meta.Plate = strings.TrimSpace(parts[len(parts)-1])
+		// Format nama file kamera umum: kodeUnix_YYYYMMDDHHmmssfff_noPlat
+		// (3 bagian). Ambil waktu tangkap dari bagian kedua agar tidak
+		// bergantung pada tag <dateTime> di dalam XML.
+		if t := parseCustomTimestamp(parts[1]); !t.IsZero() {
+			meta.CaptureTime = t
+		}
 	default:
 		meta.CameraCode = nameWithoutExt
 		meta.DeviceName = nameWithoutExt
@@ -177,6 +183,18 @@ func ParseANPRFile(xmlPath string) (*ViolationItem, error) {
 	}
 	if vehicleImg == "" && len(ftp.PictureInfoList.PictureInfos) > 1 {
 		vehicleImg = filepath.Join(baseDir, ftp.PictureInfoList.PictureInfos[1].FileName)
+	}
+
+	// File snapshot yang dikirim kamera biasanya bernama sama dengan file XML
+	// (mis. UNIX1_20260916043832189_EA8128KC.jpg). Jika file foto yang
+	// direferensikan XML (licensePlatePicture.jpg / detectionPicture.jpg) tidak
+	// ada di disk, gunakan file snapshot tersebut sebagai pengganti.
+	natural := strings.TrimSuffix(xmlPath, filepath.Ext(xmlPath)) + ".jpg"
+	if !fileExists(plateImg) && fileExists(natural) {
+		plateImg = natural
+	}
+	if !fileExists(vehicleImg) && fileExists(natural) {
+		vehicleImg = natural
 	}
 
 	item := &ViolationItem{

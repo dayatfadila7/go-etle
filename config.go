@@ -20,6 +20,7 @@ type Config struct {
 	MediaDir        string
 	RetentionDays   int
 	Port            int
+	PublicURL       string
 }
 
 func getenv(k, def string) string {
@@ -53,6 +54,7 @@ func LoadConfig() *Config {
 		MediaDir:        getenv("MEDIA_DIR", "./storage"),
 		RetentionDays:   getenvInt("RETENTION_DAYS", 2),
 		Port:            getenvInt("PORT", 8080),
+		PublicURL:       getenv("ETLE_PUBLIC_URL", getenv("BFF_URL", "http://localhost:8080")),
 	}
 }
 

@@ -70,6 +70,8 @@ func (r *Repository) SetTokens(id int64, access, refresh string) error {
 	return err
 }
 
+// UpsertMasterViolations mengembalikan jumlah data yang BENAR-BENAR berubah
+// (insert baru atau nama/raw berubah), bukan selalu seluruh row dari master API.
 func (r *Repository) UpsertMasterViolations(items []MasterViolation) (int, error) {
 	n := 0
 	for _, it := range items {
@@ -77,12 +79,23 @@ func (r *Repository) UpsertMasterViolations(items []MasterViolation) (int, error
 		if len(it.Raw) > 0 {
 			raw = it.Raw
 		}
-		_, err := r.db.Exec(
+		var inserted bool
+		err := r.db.QueryRow(
 			`INSERT INTO master_violations(code, name, raw_data, synced_at)
 			 VALUES($1,$2,$3,NOW())
-			 ON CONFLICT(code) DO UPDATE SET name=EXCLUDED.name, synced_at=EXCLUDED.synced_at`,
+			 ON CONFLICT(code) DO UPDATE
+			   SET name=EXCLUDED.name,
+			       raw_data=EXCLUDED.raw_data,
+			       synced_at=EXCLUDED.synced_at
+			   WHERE master_violations.name IS DISTINCT FROM EXCLUDED.name
+			      OR master_violations.raw_data IS DISTINCT FROM EXCLUDED.raw_data
+			 RETURNING (xmax = 0)`,
 			it.Code, it.Name, raw,
-		)
+		).Scan(&inserted)
+		if errors.Is(err, sql.ErrNoRows) {
+			// nilai sama dengan DB -> tidak ada perubahan, jangan dihitung
+			continue
+		}
 		if err != nil {
 			return n, err
 		}
@@ -202,7 +215,7 @@ func (r *Repository) EnqueueViolation(v *Violation) (int64, error) {
 		`INSERT INTO violations(client_id, camera_id, device_name, plate, plate_color, plate_image_url,
 			vehicle_type, vehicle_color, vehicle_image_url, video_url, violation_code, violation_name,
 			location_name, capture_time, status, error_message)
-		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id`,
+		 VALUES($1,NULLIF($2,0),$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id`,
 		v.ClientID, v.CameraID, v.DeviceName, v.Plate, v.PlateColor, v.PlateImageURL,
 		v.VehicleType, v.VehicleColor, v.VehicleImageURL, v.VideoURL, v.ViolationCode, v.ViolationName,
 		v.LocationName, v.CaptureTime, status, v.ErrorMessage,
@@ -213,9 +226,9 @@ func (r *Repository) EnqueueViolation(v *Violation) (int64, error) {
 func (r *Repository) GetViolation(id int64) (*Violation, error) {
 	v := &Violation{}
 	err := r.db.QueryRow(
-		`SELECT id, client_id, camera_id, device_name, plate, plate_color, plate_image_url,
+		`SELECT id, client_id, COALESCE(camera_id,0), device_name, plate, plate_color, plate_image_url,
 			vehicle_type, vehicle_color, vehicle_image_url, video_url, violation_code, violation_name,
-			location_name, capture_time, status, response_status, attempts, COALESCE(error_message, ''), created_at
+			location_name, capture_time, status, COALESCE(response_status,0), attempts, COALESCE(error_message, ''), created_at
 		 FROM violations WHERE id=$1`, id,
 	).Scan(&v.ID, &v.ClientID, &v.CameraID, &v.DeviceName, &v.Plate, &v.PlateColor, &v.PlateImageURL,
 		&v.VehicleType, &v.VehicleColor, &v.VehicleImageURL, &v.VideoURL, &v.ViolationCode, &v.ViolationName,
@@ -227,6 +240,39 @@ func (r *Repository) GetViolation(id int64) (*Violation, error) {
 		return nil, err
 	}
 	return v, nil
+}
+
+// GetViolationDetail mengambil satu pelanggaran lengkap beserta nama client & kamera.
+func (r *Repository) GetViolationDetail(id int64) (*ViolationDetail, error) {
+	vd := &ViolationDetail{}
+	var sentAt sql.NullTime
+	err := r.db.QueryRow(
+		`SELECT v.id, v.client_id, COALESCE(v.camera_id,0), v.device_name, v.plate, v.plate_color,
+		        v.plate_image_url, v.vehicle_type, v.vehicle_color, v.vehicle_image_url, v.video_url,
+		        v.violation_code, v.violation_name, v.location_name, v.capture_time, v.status,
+		        COALESCE(v.response_status,0), v.attempts, COALESCE(v.error_message,''), v.created_at, v.sent_at,
+		        COALESCE(c.name,''), COALESCE(c.client_id,''),
+		        COALESCE(cam.device_name,''), COALESCE(cam.camera_code,'')
+		   FROM violations v
+		   LEFT JOIN clients c  ON c.id  = v.client_id
+		   LEFT JOIN cameras cam ON cam.id = v.camera_id
+		  WHERE v.id=$1`, id,
+	).Scan(&vd.ID, &vd.ClientID, &vd.CameraID, &vd.DeviceName, &vd.Plate, &vd.PlateColor,
+		&vd.PlateImageURL, &vd.VehicleType, &vd.VehicleColor, &vd.VehicleImageURL, &vd.VideoURL,
+		&vd.ViolationCode, &vd.ViolationName, &vd.LocationName, &vd.CaptureTime, &vd.Status,
+		&vd.ResponseStatus, &vd.Attempts, &vd.ErrorMessage, &vd.CreatedAt, &sentAt,
+		&vd.ClientName, &vd.ClientCode, &vd.CameraName, &vd.CameraCode)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if sentAt.Valid {
+		st := sentAt.Time
+		vd.SentAt = &st
+	}
+	return vd, nil
 }
 
 // ClaimViolation ambil satu row secara atomik supaya banyak worker/proses tak kirim dua kali.
@@ -276,9 +322,9 @@ func (r *Repository) PendingViolations(limit, maxRetry, maxDelayMinutes int) ([]
 		maxDelayMinutes = 3
 	}
 	rows, err := r.db.Query(
-		`SELECT id, client_id, camera_id, device_name, plate, plate_color, plate_image_url,
+		`SELECT id, client_id, COALESCE(camera_id,0), device_name, plate, plate_color, plate_image_url,
 			vehicle_type, vehicle_color, vehicle_image_url, video_url, violation_code, violation_name,
-			location_name, capture_time, status, response_status, attempts, COALESCE(error_message, ''), created_at
+			location_name, capture_time, status, COALESCE(response_status,0), attempts, COALESCE(error_message, ''), created_at
 		 FROM violations
 		 WHERE status='pending'
 		   AND attempts < $1
@@ -325,26 +371,63 @@ func (r *Repository) FailOrRetry(id int64, attemptsSoFar, maxRetry int, errMsg s
 	return err
 }
 
-func (r *Repository) ListViolations(status string, limit int) ([]Violation, error) {
+// ListViolations mengembalikan halaman data violations beserta total tanpa filter status.
+func (r *Repository) ListViolations(status string, page, perPage int) ([]Violation, int64, error) {
+	if perPage <= 0 {
+		perPage = 20
+	}
+	if perPage > 500 {
+		perPage = 500
+	}
+	if page < 1 {
+		page = 1
+	}
+	var total int64
+	if err := r.db.QueryRow(`SELECT COUNT(*) FROM violations WHERE ($1='' OR status=$1)`, status).Scan(&total); err != nil {
+		return nil, 0, err
+	}
 	rows, err := r.db.Query(
-		`SELECT id, client_id, device_name, plate, violation_code, violation_name, status, response_status, attempts, created_at
-		 FROM violations WHERE ($1='' OR status=$1) ORDER BY id DESC LIMIT $2`,
-		status, limit,
+		`SELECT id, client_id, device_name, plate, violation_code, violation_name, status,
+		        COALESCE(response_status,0), attempts, COALESCE(capture_time,0), sent_at, created_at
+		 FROM violations WHERE ($1='' OR status=$1) ORDER BY id DESC LIMIT $2 OFFSET $3`,
+		status, perPage, (page-1)*perPage,
 	)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 	out := []Violation{}
 	for rows.Next() {
 		var v Violation
-		var createdAt string
-		if err := rows.Scan(&v.ID, &v.ClientID, &v.DeviceName, &v.Plate, &v.ViolationCode, &v.ViolationName, &v.Status, &v.ResponseStatus, &v.Attempts, &createdAt); err != nil {
-			return nil, err
+		var sentAt sql.NullTime
+		if err := rows.Scan(&v.ID, &v.ClientID, &v.DeviceName, &v.Plate, &v.ViolationCode, &v.ViolationName,
+			&v.Status, &v.ResponseStatus, &v.Attempts, &v.CaptureTime, &sentAt, &v.CreatedAt); err != nil {
+			return nil, 0, err
+		}
+		if sentAt.Valid {
+			st := sentAt.Time
+			v.SentAt = &st
 		}
 		out = append(out, v)
 	}
-	return out, nil
+	return out, total, nil
+}
+
+// GetCameraByID mengambil data kamera aktif berdasarkan ID.
+func (r *Repository) GetCameraByID(id int64) (*Camera, error) {
+	c := &Camera{}
+	err := r.db.QueryRow(
+		`SELECT id, client_id, COALESCE(camera_code,''), device_name,
+		        COALESCE(location_name,''), COALESCE(address,''), COALESCE(latitude,0), COALESCE(longitude,0), status
+		   FROM cameras WHERE id=$1 AND deleted_at IS NULL`, id,
+	).Scan(&c.ID, &c.ClientID, &c.CameraCode, &c.DeviceName, &c.LocationName, &c.Address, &c.Latitude, &c.Longitude, &c.Status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
 }
 
 func (r *Repository) CreateUser(u *User) error {

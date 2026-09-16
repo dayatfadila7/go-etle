@@ -23,10 +23,10 @@ export const db = new Kysely({
 export const auth = betterAuth({
   database: { db, type: "postgres" },
   baseURL: process.env.BFF_URL || "http://localhost:3000",
-  trustedOrigins: [
-    "http://localhost:3000",
-    "http://localhost:5173",
-  ],
+  trustedOrigins: (process.env.TRUSTED_ORIGINS || "http://localhost:3000,http://localhost:5173,http://103.199.117.48")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
   secret: process.env.BETTER_AUTH_SECRET || "dev-secret-change-me",
   emailAndPassword: { enabled: true },
 });

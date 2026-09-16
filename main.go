@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -151,7 +152,7 @@ func runSender(cfg *Config, repo *Repository, etle *ETLEClient, args []string) {
 			daemon = true
 		}
 	}
-	disp := NewDispatcher(cfg.WorkerCount, cfg.QueueSize, cfg.MaxRetry, cfg.MaxDelayMinutes, etle, repo)
+	disp := NewDispatcher(cfg.WorkerCount, cfg.QueueSize, cfg.MaxRetry, cfg.MaxDelayMinutes, etle, repo, cfg)
 	disp.Start()
 	if daemon {
 		log.Printf("sender daemon running (workers=%d)", cfg.WorkerCount)
@@ -310,7 +311,7 @@ func runImportXML(cfg *Config, repo *Repository, etle *ETLEClient, args []string
 		}
 	}
 
-	disp := NewDispatcher(cfg.WorkerCount, cfg.QueueSize, cfg.MaxRetry, cfg.MaxDelayMinutes, etle, repo)
+	disp := NewDispatcher(cfg.WorkerCount, cfg.QueueSize, cfg.MaxRetry, cfg.MaxDelayMinutes, etle, repo, cfg)
 	disp.Start()
 
 	processDir := func() (int, int, int) {
@@ -349,7 +350,20 @@ func runImportXML(cfg *Config, repo *Repository, etle *ETLEClient, args []string
 					if item.DeviceName == meta.CameraCode && cam.DeviceName != "" {
 						item.DeviceName = cam.DeviceName
 					}
+					if item.LocationName == "" && cam.LocationName != "" {
+						item.LocationName = cam.LocationName
+					}
 				}
+			}
+
+			// Hanya kirim pelanggaran dengan plat valid (mirip filter di POST /violations).
+			// Plat yang tidak terbaca (unknown/kosong) TIDAK di-record sama sekali:
+			// dilewati tanpa membuat baris di database, file langsung ditandai processed.
+			plate := strings.TrimSpace(item.Plate)
+			if plate == "" || strings.EqualFold(plate, "unknown") {
+				skipped++
+				_ = os.Rename(path, path+".processed")
+				return nil
 			}
 
 			capTime := parseCaptureTime(item.CaptureTime)
@@ -370,12 +384,12 @@ func runImportXML(cfg *Config, repo *Repository, etle *ETLEClient, args []string
 				ClientID:        actualCID,
 				CameraID:        camID,
 				DeviceName:      item.DeviceName,
-				Plate:           item.Plate,
+				Plate:           plate,
 				PlateColor:      item.PlateColor,
-				PlateImageURL:   item.PlateImageURL,
+				PlateImageURL:   BuildMediaURL(cfg, item.PlateImageURL),
 				VehicleType:     item.VehicleType,
 				VehicleColor:    item.VehicleColor,
-				VehicleImageURL: item.VehicleImageURL,
+				VehicleImageURL: BuildMediaURL(cfg, item.VehicleImageURL),
 				ViolationCode:   item.ViolationCode,
 				ViolationName:   item.ViolationName,
 				LocationName:    item.LocationName,
@@ -422,12 +436,13 @@ func runImportXML(cfg *Config, repo *Repository, etle *ETLEClient, args []string
 
 func runServer(cfg *Config, repo *Repository, etle *ETLEClient) {
 	// server jalan realtime: ingest -> enqueue -> worker kirim.
-	disp := NewDispatcher(cfg.WorkerCount, cfg.QueueSize, cfg.MaxRetry, cfg.MaxDelayMinutes, etle, repo)
+	disp := NewDispatcher(cfg.WorkerCount, cfg.QueueSize, cfg.MaxRetry, cfg.MaxDelayMinutes, etle, repo, cfg)
 	disp.Start()
 
 	h := &Handler{cfg: cfg, repo: repo, etle: etle, disp: disp}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
+	mux.Handle("/media/", http.StripPrefix("/media/", serveMedia(cfg.MediaDir)))
 	mux.HandleFunc("/dashboard/stats", h.handleDashboardStats)
 	mux.HandleFunc("/sync-logs", h.handleSyncLogs)
 	mux.HandleFunc("/sync-all", h.handleSyncAll)
@@ -437,6 +452,8 @@ func runServer(cfg *Config, repo *Repository, etle *ETLEClient) {
 	mux.HandleFunc("/cameras", h.handleCameras)
 	mux.HandleFunc("/cameras/", h.handleCameras)
 	mux.HandleFunc("/violations", h.handleViolations)
+	mux.HandleFunc("/violations/{id}", h.handleViolationDetail)
+	mux.HandleFunc("/monitoring", h.handleMonitoring)
 	mux.HandleFunc("/master", h.handleMaster)
 	mux.HandleFunc("/users", h.handleUsers)
 
@@ -449,6 +466,35 @@ func writeJSON(w http.ResponseWriter, code int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(v)
+}
+
+// serveMedia hanya menampilkan file media (gambar/video ANPR) dari MediaDir,
+// tanpa directory listing dan tanpa path keluar dari root.
+func serveMedia(root string) http.Handler {
+	if root == "" {
+		root = "./storage"
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rel := strings.TrimPrefix(r.URL.Path, "/")
+		rel = strings.ReplaceAll(rel, "\\", "/")
+		abs := filepath.Join(root, rel)
+		if _, relOK := mediaRel(root, abs); !relOK {
+			http.NotFound(w, r)
+			return
+		}
+		fi, err := os.Stat(abs)
+		if err != nil || fi.IsDir() {
+			http.NotFound(w, r)
+			return
+		}
+		switch strings.ToLower(filepath.Ext(abs)) {
+		case ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".mp4", ".mp3":
+		default:
+			http.NotFound(w, r)
+			return
+		}
+		http.ServeFile(w, r, abs)
+	})
 }
 
 func readJSON(r *http.Request, v interface{}) error {
@@ -722,16 +768,25 @@ func (h *Handler) handleViolations(w http.ResponseWriter, r *http.Request) {
 		h.ingestViolations(w, r)
 	case http.MethodGet:
 		status := r.URL.Query().Get("status")
-		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-		if limit <= 0 || limit > 1000 {
-			limit = 100
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		perPage, _ := strconv.Atoi(r.URL.Query().Get("per_page"))
+		if page < 1 {
+			page = 1
 		}
-		vs, err := h.repo.ListViolations(status, limit)
+		if perPage <= 0 {
+			perPage = 20
+		}
+		vs, total, err := h.repo.ListViolations(status, page, perPage)
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return
 		}
-		writeJSON(w, 200, vs)
+		writeJSON(w, 200, map[string]interface{}{
+			"items":    vs,
+			"total":    total,
+			"page":     page,
+			"per_page": perPage,
+		})
 	default:
 		http.Error(w, "method not allowed", 405)
 	}
@@ -818,10 +873,10 @@ func (h *Handler) ingestViolations(w http.ResponseWriter, r *http.Request) {
 			DeviceName:      it.DeviceName,
 			Plate:           plate,
 			PlateColor:      it.PlateColor,
-			PlateImageURL:   it.PlateImageURL,
+			PlateImageURL:   BuildMediaURL(h.cfg, it.PlateImageURL),
 			VehicleType:     it.VehicleType,
 			VehicleColor:    it.VehicleColor,
-			VehicleImageURL: it.VehicleImageURL,
+			VehicleImageURL: BuildMediaURL(h.cfg, it.VehicleImageURL),
 			VideoURL:        it.VideoURL,
 			ViolationCode:   code,
 			ViolationName:   it.ViolationName,
@@ -936,6 +991,92 @@ func (h *Handler) handleSyncLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, logs)
+}
+
+// handleViolationDetail: detail satu pelanggaran lengkap (termasuk gambar).
+func (h *Handler) handleViolationDetail(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", 405)
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid id", 400)
+		return
+	}
+	vd, err := h.repo.GetViolationDetail(id)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	if vd == nil {
+		http.Error(w, "not found", 404)
+		return
+	}
+	writeJSON(w, 200, vd)
+}
+
+// handleMonitoring: membaca log monitoring kinerja (TSV) dan mengembalikannya
+// sebagai JSON untuk ditampilkan di halaman Monitoring web.
+func (h *Handler) handleMonitoring(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", 405)
+		return
+	}
+	sys := readLogTSV("/var/log/etle-system-perf.log", 60)
+	dbp := readLogTSV("/var/log/etle-db-perf.log", 60)
+	del := readLogTSV("/var/log/etle-delivery.log", 100)
+	writeJSON(w, 200, map[string]interface{}{
+		"system":       sys,
+		"db":           dbp,
+		"delivery":     del,
+		"system_file":  "/var/log/etle-system-perf.log",
+		"db_file":      "/var/log/etle-db-perf.log",
+		"delivery_file": "/var/log/etle-delivery.log",
+	})
+}
+
+// readLogTSV membaca file TSV ber-headbaris dan mengembalikan max baris terakhir
+// sebagai array object (key = nama kolom di header).
+func readLogTSV(path string, max int) []map[string]string {
+	f, err := os.Open(path)
+	if err != nil {
+		return []map[string]string{}
+	}
+	defer f.Close()
+	lines, err := readLines(f)
+	if err != nil || len(lines) == 0 {
+		return []map[string]string{}
+	}
+	headers := strings.Split(lines[0], "\t")
+	body := lines[1:]
+	if len(body) > max {
+		body = body[len(body)-max:]
+	}
+	out := make([]map[string]string, 0, len(body))
+	for _, ln := range body {
+		cols := strings.Split(ln, "\t")
+		row := make(map[string]string, len(headers))
+		for i, h := range headers {
+			if i < len(cols) {
+				row[h] = cols[i]
+			}
+		}
+		if len(cols) == len(headers) {
+			out = append(out, row)
+		}
+	}
+	return out
+}
+
+func readLines(f *os.File) ([]string, error) {
+	var lines []string
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 64*1024), 1024*1024)
+	for sc.Scan() {
+		lines = append(lines, sc.Text())
+	}
+	return lines, sc.Err()
 }
 
 func (h *Handler) handleSyncAll(w http.ResponseWriter, r *http.Request) {

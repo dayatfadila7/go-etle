@@ -1,9 +1,41 @@
 package main
 
 import (
+	"fmt"
 	"log"
+	"os"
+	"strings"
 	"time"
 )
+
+// deliveryLogFile = log pengiriman ETLE (TSV). Satu baris per upaya kirim.
+var deliveryLogFile = "/var/log/etle-delivery.log"
+
+func (d *Dispatcher) logDelivery(v *Violation, result string, attempt, httpStatus, etleStatus int, errMsg string, dur time.Duration) {
+	line := fmt.Sprintf("%s\t%s\t%d\t%s\t%s\t%d\t%s\t%d\t%d\t%d\t%s\t%d\n",
+		time.Now().Format(time.RFC3339),
+		result,
+		v.ID,
+		v.Plate,
+		v.DeviceName,
+		attempt,
+		v.ViolationCode,
+		v.CaptureTime,
+		httpStatus,
+		etleStatus,
+		errMsg,
+		dur.Milliseconds(),
+	)
+	f, err := os.OpenFile(deliveryLogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	if fi, e := f.Stat(); e == nil && fi.Size() == 0 {
+		_, _ = f.WriteString("time\tresult\tid\tplate\tdevice\tattempt\tviolation_code\tcapture_time_ms\thttp_status\tetle_status\terror\tduration_ms\n")
+	}
+	_, _ = f.WriteString(line)
+}
 
 type Job struct {
 	ViolationID int64
@@ -20,11 +52,16 @@ type Dispatcher struct {
 	repo            *Repository
 	maxRetry        int
 	maxDelayMinutes int
+	mediaURL        func(string) string
 }
 
-func NewDispatcher(workers, queueSize, maxRetry, maxDelayMinutes int, etle *ETLEClient, repo *Repository) *Dispatcher {
+func NewDispatcher(workers, queueSize, maxRetry, maxDelayMinutes int, etle *ETLEClient, repo *Repository, cfg *Config) *Dispatcher {
 	if maxDelayMinutes <= 0 {
 		maxDelayMinutes = 3
+	}
+	var mfunc func(string) string
+	if cfg != nil {
+		mfunc = func(p string) string { return BuildMediaURL(cfg, p) }
 	}
 	return &Dispatcher{
 		jobChan:         make(chan Job, queueSize),
@@ -33,6 +70,7 @@ func NewDispatcher(workers, queueSize, maxRetry, maxDelayMinutes int, etle *ETLE
 		repo:            repo,
 		maxRetry:        maxRetry,
 		maxDelayMinutes: maxDelayMinutes,
+		mediaURL:        mfunc,
 	}
 }
 
@@ -76,12 +114,14 @@ func (d *Dispatcher) process(j Job) {
 	isCrossDay := v.CreatedAt.Year() != now.Year() || v.CreatedAt.YearDay() != now.YearDay()
 	if isCrossDay || now.Sub(v.CreatedAt) > maxDelay {
 		_ = d.repo.MarkFailed(j.ViolationID, "expired: delay melebihi batas 3 menit atau beda hari kalender")
+		d.logDelivery(v, "expired", v.Attempts, 0, 0, "delay melebihi batas atau beda hari", 0)
 		return
 	}
 
 	c, err := d.repo.GetClient(j.ClientID)
 	if err != nil || c == nil {
 		_ = d.repo.MarkFailed(j.ViolationID, "client not found")
+		d.logDelivery(v, "failed", v.Attempts, 0, 0, "client not found", 0)
 		return
 	}
 
@@ -106,6 +146,24 @@ func (d *Dispatcher) process(j Job) {
 		LocationName:    v.LocationName,
 		CaptureTime:     v.CaptureTime,
 	}
+	if d.mediaURL != nil {
+		item.PlateImageURL = d.mediaURL(item.PlateImageURL)
+		item.VehicleImageURL = d.mediaURL(item.VehicleImageURL)
+	}
+	// Lokasi wajib sama persis (ETLE memakai "=" bukan LIKE) -> ambil dari kamera bila kosong.
+	if item.LocationName == "" && v.CameraID > 0 {
+		if cam, e := d.repo.GetCameraByID(v.CameraID); e == nil && cam != nil && cam.LocationName != "" {
+			item.LocationName = cam.LocationName
+		}
+	}
+	// antivirus: jangan kirim row dengan plat tidak valid ke ETLE
+	plate := strings.TrimSpace(item.Plate)
+	if plate == "" || strings.EqualFold(plate, "unknown") {
+		_ = d.repo.MarkFailed(j.ViolationID, "dilewati: plat nomor tidak terbaca (unknown). Tidak dikirim ke ETLE.")
+		d.logDelivery(v, "skipped_unknown", v.Attempts, 0, 0, "plat nomor tidak terbaca (unknown)", 0)
+		return
+	}
+	start := time.Now()
 	resp, err := d.etle.SendViolation(c, ViolationPayload{Datas: []ViolationItem{item}})
 	if err != nil {
 		// token expired (401) -> login ulang lalu retry sekali
@@ -117,11 +175,18 @@ func (d *Dispatcher) process(j Job) {
 			}
 		}
 	}
+	dur := time.Since(start)
 	if err != nil {
+		httpStatus := 0
+		if apiErr, ok := err.(*APIError); ok {
+			httpStatus = apiErr.StatusCode
+		}
 		_ = d.repo.FailOrRetry(j.ViolationID, v.Attempts, d.maxRetry, err.Error())
+		d.logDelivery(v, "failed", v.Attempts+1, httpStatus, 0, err.Error(), dur)
 		return
 	}
 	_ = d.repo.MarkSent(j.ViolationID, resp.Status)
+	d.logDelivery(v, "sent", v.Attempts+1, 200, resp.Status, "", dur)
 }
 
 func (d *Dispatcher) reaper() {

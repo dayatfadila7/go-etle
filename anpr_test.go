@@ -6,6 +6,51 @@ import (
 	"testing"
 )
 
+func TestParseANPRFileFallsBackToSnapshotImage(t *testing.T) {
+	tempDir := t.TempDir()
+	// Snapshot file kamera (nama sama dengan XML, ekstensi .jpg)
+	snapshot := filepath.Join(tempDir, "UNIX1_20260916043832189_EA8128KC.jpg")
+	if err := os.WriteFile(snapshot, []byte("fake-jpeg"), 0644); err != nil {
+		t.Fatalf("write snapshot: %v", err)
+	}
+	xmlPath := filepath.Join(tempDir, "UNIX1_20260916043832189_EA8128KC.xml")
+	xmlContent := `<FTP>
+<dateTime>2026-09-16T04:38:32.189+07:00</dateTime>
+<licensePlate>EA8128KC</licensePlate>
+<illegalInfo>
+<illegalCode>1240</illegalCode>
+<illegalName>No_Seatbelt_Fastened</illegalName>
+</illegalInfo>
+<vehicleType>truck</vehicleType>
+<pictureInfoList>
+<pictureInfo>
+<fileName>licensePlatePicture.jpg</fileName>
+<type>licensePlatePicture</type>
+</pictureInfo>
+<pictureInfo>
+<fileName>detectionPicture.jpg</fileName>
+<type>detectionPicture</type>
+</pictureInfo>
+</pictureInfoList>
+</FTP>`
+	if err := os.WriteFile(xmlPath, []byte(xmlContent), 0644); err != nil {
+		t.Fatalf("write xml: %v", err)
+	}
+
+	item, err := ParseANPRFile(xmlPath)
+	if err != nil {
+		t.Fatalf("ParseANPRFile: %v", err)
+	}
+	// licensePlatePicture.jpg / detectionPicture.jpg tidak ada di disk,
+	// sehingga harus fallback ke snapshot .jpg milik XML itu sendiri.
+	if item.PlateImageURL != snapshot {
+		t.Errorf("expected PlateImageURL fallback to %s, got %s", snapshot, item.PlateImageURL)
+	}
+	if item.VehicleImageURL != snapshot {
+		t.Errorf("expected VehicleImageURL fallback to %s, got %s", snapshot, item.VehicleImageURL)
+	}
+}
+
 func TestParseANPRFilename(t *testing.T) {
 	// 5-part format
 	fn5 := "UNIX1_pasuruan_Jalan A.Yani Bangil Kab.Pasuruan_20240716111021710_W5003QC.xml"
