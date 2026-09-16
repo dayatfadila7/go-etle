@@ -21,10 +21,13 @@ export const api = {
   deleteClient: (id: number) => req(`/clients/${id}?id=${id}`, { method: "DELETE" }),
   syncMaster: (id: number) => req(`/clients/${id}/sync`, { method: "POST", body: "{}" }),
   master: () => req("/master"),
-  violations: (status = "") => req("/violations?status=" + status + "&limit=200"),
+  violations: (status = "", page = 1, perPage = 20) =>
+    req(`/violations?status=${status}&page=${page}&per_page=${perPage}`),
+  violationDetail: (id: number | string) => req(`/violations/${id}`),
   cameras: (clientId = 0) => req("/cameras" + (clientId ? "?client_id=" + clientId : "")),
   createCamera: (b: any) => req("/cameras", { method: "POST", body: JSON.stringify(b) }),
   updateCamera: (id: number, b: any) => req(`/cameras/${id}`, { method: "PUT", body: JSON.stringify({ ...b, id }) }),
   deleteCamera: (id: number) => req(`/cameras/${id}?id=${id}`, { method: "DELETE" }),
+  monitoring: () => req("/monitoring"),
 };
 

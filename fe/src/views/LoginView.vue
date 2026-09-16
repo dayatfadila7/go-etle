@@ -83,8 +83,8 @@ async function submitLogin() {
         <div class="w-14 h-14 mx-auto mb-4 rounded-xl bg-blue-600/10 border border-blue-500/30 flex items-center justify-center text-blue-400 text-2xl">
           <i class="fa-solid fa-shield-halved"></i>
         </div>
-        <h2 class="text-xl font-bold text-white tracking-wide">ETLE POLRI GATEWAY</h2>
-        <p class="text-xs text-slate-400 mt-1">Sistem Integrasi Data Elektronik Traffic Law Enforcement</p>
+        <h2 class="text-xl font-bold text-white tracking-wide">SATRIA</h2>
+        <p class="text-xs text-slate-400 mt-1">Sistem Antar-sistem Transfer Rekam Informasi Aplikasi Tilang Elektronik</p>
       </div>
 
       <!-- Form -->

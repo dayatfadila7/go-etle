@@ -17,6 +17,7 @@ const navItems = [
   { path: "/master-pelanggaran", label: "Master Pelanggaran", icon: "fa-solid fa-book-bookmark" },
   { path: "/cameras", label: "Kamera", icon: "fa-solid fa-video" },
   { path: "/violations", label: "Pelanggaran", icon: "fa-solid fa-triangle-exclamation" },
+  { path: "/monitoring", label: "Monitoring Kinerja", icon: "fa-solid fa-chart-line" },
 ];
 
 onMounted(async () => {
@@ -29,7 +30,7 @@ const userEmail = computed(() => {
 
 const currentRouteName = computed(() => {
   const current = navItems.find((item) => item.path === route.path);
-  return current ? current.label : "Portal ETLE";
+  return current ? current.label : "Portal SATRIA";
 });
 
 function openLogoutModal() {
@@ -63,8 +64,8 @@ async function confirmLogout() {
           <i class="fa-solid fa-shield-halved"></i>
         </div>
         <div class="leading-tight">
-          <span class="font-bold text-sm text-white tracking-wider block">ETLE POLRI</span>
-          <span class="text-[11px] text-slate-400 block font-medium">Gateway Integrasi</span>
+          <span class="font-bold text-sm text-white tracking-wider block">SATRIA</span>
+          <span class="text-[10px] text-slate-400 block font-medium leading-tight">Sistem Antar-sistem Transfer Rekam Informasi Aplikasi Tilang Elektronik</span>
         </div>
       </div>
 
@@ -176,7 +177,7 @@ async function confirmLogout() {
 
           <div class="flex items-center gap-2 bg-slate-950 border border-slate-800 px-3 py-1.5 rounded text-slate-300 font-mono">
             <i class="fa-solid fa-server text-blue-400"></i>
-            <span>ETLE API: Online</span>
+            <span>SATRIA API: Online</span>
           </div>
         </div>
       </header>
@@ -202,12 +203,12 @@ async function confirmLogout() {
             </div>
             <div>
               <h3 class="text-sm font-bold text-white tracking-wide">Konfirmasi Keluar Sesi</h3>
-              <p class="text-xs text-slate-400">Portal Integrasi ETLE Korlantas</p>
+              <p class="text-xs text-slate-400">Portal Satuan Rekam Informasi Aplikasi Tilang Elektronik</p>
             </div>
           </div>
 
           <p class="text-xs text-slate-300 mb-6 leading-relaxed">
-            Apakah Anda yakin ingin keluar dari sesi portal ETLE ini? Anda harus memasukkan kredensial login kembali untuk mengakses data.
+            Apakah Anda yakin ingin keluar dari sesi portal SATRIA ini? Anda harus memasukkan kredensial login kembali untuk mengakses data.
           </p>
 
           <div class="flex items-center justify-end gap-2.5">

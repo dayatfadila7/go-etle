@@ -8,6 +8,8 @@ import ClientsView from "../views/ClientsView.vue";
 import MasterView from "../views/MasterView.vue";
 import CamerasView from "../views/CamerasView.vue";
 import ViolationsView from "../views/ViolationsView.vue";
+import ViolationDetailView from "../views/ViolationDetailView.vue";
+import MonitoringView from "../views/MonitoringView.vue";
 
 const routes = [
   {
@@ -49,6 +51,16 @@ const routes = [
         path: "violations",
         name: "violations",
         component: ViolationsView,
+      },
+      {
+        path: "violations/:id",
+        name: "violation-detail",
+        component: ViolationDetailView,
+      },
+      {
+        path: "monitoring",
+        name: "monitoring",
+        component: MonitoringView,
       },
     ],
   },

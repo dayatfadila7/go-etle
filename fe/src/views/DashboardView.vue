@@ -40,7 +40,7 @@ async function loadDashboardData() {
     ]);
     if (st.status === "fulfilled") stats.value = st.value;
     if (sl.status === "fulfilled") syncLogs.value = sl.value;
-    if (vs.status === "fulfilled") recentViolations.value = (vs.value || []).slice(0, 8);
+    if (vs.status === "fulfilled") recentViolations.value = ((vs.value?.items || []) as any[]).slice(0, 8);
   } catch (e: any) {
     notify("Gagal memuat data dashboard: " + e.message, "error");
   }
