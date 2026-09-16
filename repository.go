@@ -226,9 +226,11 @@ func (r *Repository) EnqueueViolation(v *Violation) (int64, error) {
 func (r *Repository) GetViolation(id int64) (*Violation, error) {
 	v := &Violation{}
 	err := r.db.QueryRow(
-		`SELECT id, client_id, COALESCE(camera_id,0), device_name, plate, plate_color, plate_image_url,
-			vehicle_type, vehicle_color, vehicle_image_url, video_url, violation_code, violation_name,
-			location_name, capture_time, status, COALESCE(response_status,0), attempts, COALESCE(error_message, ''), created_at
+		`SELECT id, client_id, COALESCE(camera_id,0), device_name, plate, COALESCE(plate_color,''),
+			COALESCE(plate_image_url,''), COALESCE(vehicle_type,''), COALESCE(vehicle_color,''),
+			COALESCE(vehicle_image_url,''), COALESCE(video_url,''), violation_code, violation_name,
+			COALESCE(location_name,''), COALESCE(capture_time,0), status, COALESCE(response_status,0),
+			attempts, COALESCE(error_message, ''), created_at
 		 FROM violations WHERE id=$1`, id,
 	).Scan(&v.ID, &v.ClientID, &v.CameraID, &v.DeviceName, &v.Plate, &v.PlateColor, &v.PlateImageURL,
 		&v.VehicleType, &v.VehicleColor, &v.VehicleImageURL, &v.VideoURL, &v.ViolationCode, &v.ViolationName,
@@ -247,9 +249,10 @@ func (r *Repository) GetViolationDetail(id int64) (*ViolationDetail, error) {
 	vd := &ViolationDetail{}
 	var sentAt sql.NullTime
 	err := r.db.QueryRow(
-		`SELECT v.id, v.client_id, COALESCE(v.camera_id,0), v.device_name, v.plate, v.plate_color,
-		        v.plate_image_url, v.vehicle_type, v.vehicle_color, v.vehicle_image_url, v.video_url,
-		        v.violation_code, v.violation_name, v.location_name, v.capture_time, v.status,
+		`SELECT v.id, v.client_id, COALESCE(v.camera_id,0), v.device_name, v.plate, COALESCE(v.plate_color,''),
+		        COALESCE(v.plate_image_url,''), COALESCE(v.vehicle_type,''), COALESCE(v.vehicle_color,''),
+		        COALESCE(v.vehicle_image_url,''), COALESCE(v.video_url,''),
+		        v.violation_code, v.violation_name, COALESCE(v.location_name,''), COALESCE(v.capture_time,0), v.status,
 		        COALESCE(v.response_status,0), v.attempts, COALESCE(v.error_message,''), v.created_at, v.sent_at,
 		        COALESCE(c.name,''), COALESCE(c.client_id,''),
 		        COALESCE(cam.device_name,''), COALESCE(cam.camera_code,'')
@@ -322,9 +325,11 @@ func (r *Repository) PendingViolations(limit, maxRetry, maxDelayMinutes int) ([]
 		maxDelayMinutes = 3
 	}
 	rows, err := r.db.Query(
-		`SELECT id, client_id, COALESCE(camera_id,0), device_name, plate, plate_color, plate_image_url,
-			vehicle_type, vehicle_color, vehicle_image_url, video_url, violation_code, violation_name,
-			location_name, capture_time, status, COALESCE(response_status,0), attempts, COALESCE(error_message, ''), created_at
+		`SELECT id, client_id, COALESCE(camera_id,0), device_name, plate, COALESCE(plate_color,''),
+			COALESCE(plate_image_url,''), COALESCE(vehicle_type,''), COALESCE(vehicle_color,''),
+			COALESCE(vehicle_image_url,''), COALESCE(video_url,''), violation_code, violation_name,
+			COALESCE(location_name,''), COALESCE(capture_time,0), status, COALESCE(response_status,0),
+			attempts, COALESCE(error_message, ''), created_at
 		 FROM violations
 		 WHERE status='pending'
 		   AND attempts < $1
@@ -524,4 +529,3 @@ func (r *Repository) GetDashboardStats() (*DashboardStats, error) {
 	_ = r.db.QueryRow(`SELECT COUNT(*) FROM master_violations`).Scan(&s.MasterCount)
 	return s, nil
 }
-

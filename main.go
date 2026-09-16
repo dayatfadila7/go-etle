@@ -141,10 +141,10 @@ func runCleanup(cfg *Config, repo *Repository, args []string) {
 		deletedDB, deletedFiles, strings.Join(exts, ", "), *dir, mbFreed)
 }
 
-
 // send: kirim violation ke ETLE. Jalankan via cronjob.
-//   go run . send            -> one-shot: drain semua pending lalu exit
-//   go run . send --daemon   -> jalan terus (background worker)
+//
+//	go run . send            -> one-shot: drain semua pending lalu exit
+//	go run . send --daemon   -> jalan terus (background worker)
 func runSender(cfg *Config, repo *Repository, etle *ETLEClient, args []string) {
 	daemon := false
 	for _, a := range args {
@@ -314,6 +314,13 @@ func runImportXML(cfg *Config, repo *Repository, etle *ETLEClient, args []string
 	disp := NewDispatcher(cfg.WorkerCount, cfg.QueueSize, cfg.MaxRetry, cfg.MaxDelayMinutes, etle, repo, cfg)
 	disp.Start()
 
+	// Muat master pelanggaran ETLE agar bisa memetakan kode dan nama resmi.
+	masters, _ := repo.ListMaster()
+	mm := map[string]string{}
+	for _, m := range masters {
+		mm[m.Code] = m.Name
+	}
+
 	processDir := func() (int, int, int) {
 		enqueued, skipped, expired := 0, 0, 0
 		now := time.Now()
@@ -366,6 +373,21 @@ func runImportXML(cfg *Config, repo *Repository, etle *ETLEClient, args []string
 				return nil
 			}
 
+			// Map kode pelanggaran kamera (angka, mis. 1240) ke kode master ETLE
+			// Korlantas (huruf, mis. PS). Kode tanpa mapping TIDAK dikirim ke ETLE
+			// karena ETLE mencocokkan violationCode dengan daftar masternya.
+			etleCode, ok := MapViolationCode(item.ViolationCode)
+			if !ok {
+				log.Printf("lewatkan %s: violation_code %q tidak punya mapping ke ETLE", filepath.Base(path), item.ViolationCode)
+				skipped++
+				_ = os.Rename(path, path+".processed")
+				return nil
+			}
+			item.ViolationCode = etleCode
+			if name, ok := mm[etleCode]; ok {
+				item.ViolationName = name
+			}
+
 			capTime := parseCaptureTime(item.CaptureTime)
 			isStale := false
 			staleReason := ""
@@ -386,10 +408,10 @@ func runImportXML(cfg *Config, repo *Repository, etle *ETLEClient, args []string
 				DeviceName:      item.DeviceName,
 				Plate:           plate,
 				PlateColor:      item.PlateColor,
-				PlateImageURL:   BuildMediaURL(cfg, item.PlateImageURL),
+				PlateImageURL:   CopyToSnapshots(cfg, item.PlateImageURL),
 				VehicleType:     item.VehicleType,
 				VehicleColor:    item.VehicleColor,
-				VehicleImageURL: BuildMediaURL(cfg, item.VehicleImageURL),
+				VehicleImageURL: CopyToSnapshots(cfg, item.VehicleImageURL),
 				ViolationCode:   item.ViolationCode,
 				ViolationName:   item.ViolationName,
 				LocationName:    item.LocationName,
@@ -652,7 +674,6 @@ func (h *Handler) syncMaster(w http.ResponseWriter, r *http.Request, id int64) {
 	writeJSON(w, 200, map[string]interface{}{"synced": n, "items": items})
 }
 
-
 func (h *Handler) setToken(w http.ResponseWriter, r *http.Request, id int64) {
 	var body struct {
 		AccessToken  string `json:"access_token"`
@@ -840,6 +861,11 @@ func (h *Handler) ingestViolations(w http.ResponseWriter, r *http.Request) {
 	for _, it := range in.Datas {
 		code := strings.TrimSpace(it.ViolationCode)
 		plate := strings.TrimSpace(it.Plate)
+		// Map kode kamera (angka) ke kode master ETLE Korlantas (huruf) bila ada.
+		if mapped, ok := MapViolationCode(code); ok {
+			code = mapped
+			it.ViolationCode = mapped
+		}
 		if code == "" || mm[code] == "" {
 			// violation_code unknown / kosong -> jangan diproses
 			skipped++
@@ -1027,11 +1053,11 @@ func (h *Handler) handleMonitoring(w http.ResponseWriter, r *http.Request) {
 	dbp := readLogTSV("/var/log/etle-db-perf.log", 60)
 	del := readLogTSV("/var/log/etle-delivery.log", 100)
 	writeJSON(w, 200, map[string]interface{}{
-		"system":       sys,
-		"db":           dbp,
-		"delivery":     del,
-		"system_file":  "/var/log/etle-system-perf.log",
-		"db_file":      "/var/log/etle-db-perf.log",
+		"system":        sys,
+		"db":            dbp,
+		"delivery":      del,
+		"system_file":   "/var/log/etle-system-perf.log",
+		"db_file":       "/var/log/etle-db-perf.log",
 		"delivery_file": "/var/log/etle-delivery.log",
 	})
 }
@@ -1189,4 +1215,3 @@ func (h *Handler) handleCleanup(w http.ResponseWriter, r *http.Request) {
 		"message":       msg,
 	})
 }
-

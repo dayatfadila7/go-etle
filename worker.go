@@ -61,7 +61,7 @@ func NewDispatcher(workers, queueSize, maxRetry, maxDelayMinutes int, etle *ETLE
 	}
 	var mfunc func(string) string
 	if cfg != nil {
-		mfunc = func(p string) string { return BuildMediaURL(cfg, p) }
+		mfunc = func(p string) string { return CopyToSnapshots(cfg, p) }
 	}
 	return &Dispatcher{
 		jobChan:         make(chan Job, queueSize),
@@ -146,6 +146,10 @@ func (d *Dispatcher) process(j Job) {
 		LocationName:    v.LocationName,
 		CaptureTime:     v.CaptureTime,
 	}
+	// Safety net: pastikan yang dikirim selalu kode master ETLE (huruf).
+	if mapped, ok := MapViolationCode(item.ViolationCode); ok {
+		item.ViolationCode = mapped
+	}
 	if d.mediaURL != nil {
 		item.PlateImageURL = d.mediaURL(item.PlateImageURL)
 		item.VehicleImageURL = d.mediaURL(item.VehicleImageURL)
@@ -190,7 +194,7 @@ func (d *Dispatcher) process(j Job) {
 }
 
 func (d *Dispatcher) reaper() {
-	ticker := time.NewTicker(10 * time.Second)
+	ticker := time.NewTicker(3 * time.Second)
 	for range ticker.C {
 		_, _ = d.repo.ResetStuck()
 		_, _ = d.repo.ExpireStaleViolations(d.maxDelayMinutes)
