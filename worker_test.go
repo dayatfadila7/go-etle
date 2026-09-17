@@ -46,3 +46,34 @@ func TestLogDelivery(t *testing.T) {
 		t.Fatalf("bad failed row: %q", lines[2])
 	}
 }
+
+func TestPrepareItem(t *testing.T) {
+	d := &Dispatcher{mediaURL: func(p string) string { return "http://host" + p }}
+
+	v := &Violation{
+		Plate:           "B1234CD",
+		ViolationCode:   "1240",
+		PlateImageURL:   "/plate.jpg",
+		VehicleImageURL: "/vehicle.jpg",
+		LocationName:    "Pasuruan",
+	}
+	item, reason := d.prepareItem(v)
+	if reason != "" {
+		t.Fatalf("unexpected skip reason: %s", reason)
+	}
+	if item.ViolationCode != "PS" {
+		t.Errorf("expected mapped code PS, got %s", item.ViolationCode)
+	}
+	if item.PlateImageURL != "http://host/plate.jpg" || item.VehicleImageURL != "http://host/vehicle.jpg" {
+		t.Errorf("media URL tidak di-map: %q %q", item.PlateImageURL, item.VehicleImageURL)
+	}
+
+	unknown := &Violation{Plate: "unknown", LocationName: "X", ViolationCode: "PS"}
+	if _, reason := d.prepareItem(unknown); reason == "" {
+		t.Error("plat unknown harus dilewati")
+	}
+	empty := &Violation{Plate: "  ", LocationName: "X", ViolationCode: "PS"}
+	if _, reason := d.prepareItem(empty); reason == "" {
+		t.Error("plat kosong harus dilewati")
+	}
+}

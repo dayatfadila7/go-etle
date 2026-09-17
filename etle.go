@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -53,6 +54,47 @@ func (e *ETLEClient) Login(c *Client) (*LoginResponse, error) {
 	return &lr, nil
 }
 
+// IsTokenExpired menandai error HTTP ETLE yang berarti JWT sudah kedaluwarsa.
+// ETLE mengembalikan 401 kadang, tetapi untuk JWT expired seringnya 403
+// {"name":"TokenExpiredError","message":"jwt expired",...}.
+func IsTokenExpired(err error) bool {
+	apiErr, ok := err.(*APIError)
+	if !ok {
+		return false
+	}
+	if apiErr.StatusCode != 401 && apiErr.StatusCode != 403 {
+		return false
+	}
+	body := strings.ToLower(apiErr.Body)
+	return strings.Contains(body, "jwt expired") ||
+		strings.Contains(body, "token expired") ||
+		strings.Contains(body, "tokenexpirederror") ||
+		strings.Contains(body, "\"expired\"")
+}
+
+// TokenExpired mengecek masa berlaku JWT access_token secara lokal (decode exp),
+// tanpa memanggil server. Token kosong dianggap expired agar dipaksa login ulang.
+func TokenExpired(token string) bool {
+	if token == "" {
+		return true
+	}
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		return false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return false
+	}
+	var claims struct {
+		Exp int64 `json:"exp"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return false
+	}
+	return claims.Exp > 0 && time.Now().Unix() >= claims.Exp
+}
+
 func (e *ETLEClient) SyncMaster(c *Client) ([]MasterViolation, error) {
 	tok := c.AuthToken
 	if tok == "" {
@@ -68,7 +110,29 @@ func (e *ETLEClient) SyncMaster(c *Client) ([]MasterViolation, error) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		return nil, &APIError{resp.StatusCode, string(body)}
+		apiErr := &APIError{resp.StatusCode, string(body)}
+		if !IsTokenExpired(apiErr) {
+			return nil, apiErr
+		}
+		// token kedaluwarsa -> login ulang sekali lalu coba lagi
+		lr, lerr := e.Login(c)
+		if lerr != nil {
+			return nil, apiErr
+		}
+		c.AuthToken = lr.AccessToken
+		c.RefreshToken = lr.RefreshToken
+		req2, _ := http.NewRequest("GET", e.baseURL(c)+"/master/list", nil)
+		req2.Header.Set("Authorization", "Bearer "+lr.AccessToken)
+		req2.Header.Set("Accept", "application/json")
+		resp2, err2 := e.http.Do(req2)
+		if err2 != nil {
+			return nil, err2
+		}
+		defer resp2.Body.Close()
+		body, _ = io.ReadAll(resp2.Body)
+		if resp2.StatusCode != 200 {
+			return nil, &APIError{resp2.StatusCode, string(body)}
+		}
 	}
 	return parseMaster(body)
 }

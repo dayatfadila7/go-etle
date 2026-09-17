@@ -233,6 +233,9 @@ func runSync(repo *Repository, etle *ETLEClient, args []string) {
 		if getErr != nil || c == nil {
 			log.Fatalf("client id %d tidak ditemukan", *clientID)
 		}
+		if !c.IsActive {
+			log.Fatalf("client id %d tidak aktif, jalankan sync dengan client aktif", *clientID)
+		}
 		clientIDPtr = &c.ID
 		clientName = c.Name
 		log.Printf("sync master menggunakan client '%s' (id=%d)...", c.Name, c.ID)
@@ -308,6 +311,14 @@ func runImportXML(cfg *Config, repo *Repository, etle *ETLEClient, args []string
 		}
 		if cid <= 0 {
 			log.Fatal("tidak ada client aktif. Daftarkan client terlebih dahulu.")
+		}
+	} else {
+		c, getErr := repo.GetClient(cid)
+		if getErr != nil || c == nil {
+			log.Fatalf("client id %d tidak ditemukan", cid)
+		}
+		if !c.IsActive {
+			log.Fatalf("client id %d tidak aktif, tidak diproses", cid)
 		}
 	}
 
@@ -469,12 +480,14 @@ func runServer(cfg *Config, repo *Repository, etle *ETLEClient) {
 	mux.HandleFunc("/sync-logs", h.handleSyncLogs)
 	mux.HandleFunc("/sync-all", h.handleSyncAll)
 	mux.HandleFunc("/cleanup", h.handleCleanup)
+	mux.HandleFunc("/send", h.handleSendPending)
 	mux.HandleFunc("/clients", h.handleClients)
 	mux.HandleFunc("/clients/", h.handleClients)
 	mux.HandleFunc("/cameras", h.handleCameras)
 	mux.HandleFunc("/cameras/", h.handleCameras)
 	mux.HandleFunc("/violations", h.handleViolations)
 	mux.HandleFunc("/violations/{id}", h.handleViolationDetail)
+	mux.HandleFunc("/violations/{id}/send", h.handleSendOne)
 	mux.HandleFunc("/monitoring", h.handleMonitoring)
 	mux.HandleFunc("/master", h.handleMaster)
 	mux.HandleFunc("/users", h.handleUsers)
@@ -640,6 +653,10 @@ func (h *Handler) syncMaster(w http.ResponseWriter, r *http.Request, id int64) {
 	c, err := h.repo.GetClient(id)
 	if err != nil || c == nil {
 		http.Error(w, "client not found", 404)
+		return
+	}
+	if !c.IsActive {
+		http.Error(w, "client tidak aktif", 400)
 		return
 	}
 	items, err := h.etle.SyncMaster(c)
@@ -838,6 +855,19 @@ func (h *Handler) ingestViolations(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(in.Datas) == 0 {
 		http.Error(w, "datas empty", 400)
+		return
+	}
+	c, err := h.repo.GetClient(in.ClientID)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	if c == nil {
+		http.Error(w, "client not found", 400)
+		return
+	}
+	if !c.IsActive {
+		http.Error(w, "client tidak aktif", 400)
 		return
 	}
 	// load master agar bisa filter code yang unknown (tidak diproses)
@@ -1171,6 +1201,43 @@ func (h *Handler) handleSyncAll(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]interface{}{"status": "ok", "synced": n, "items": len(items), "message": msg})
 }
 
+// handleSendPending mengirim seluruh antrean pending ke ETLE secara batch
+// (beberapa pelanggaran per request) dengan token on-the-fly. Endpoint ini
+// dipakai untuk pengiriman manual/on-demand ketika data menumpuk.
+func (h *Handler) handleSendPending(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", 405)
+		return
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	summary, err := h.disp.SendPending(limit)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	writeJSON(w, 200, summary)
+}
+
+// handleSendOne mengirim satu pelanggaran tertentu ke ETLE saat itu juga.
+func (h *Handler) handleSendOne(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", 405)
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid id", 400)
+		return
+	}
+	summary, err := h.disp.SendOne(id)
+	if err != nil {
+		writeJSON(w, 400, map[string]interface{}{"error": err.Error(), "summary": summary})
+		return
+	}
+	writeJSON(w, 200, summary)
+}
+
+// handleCleanup menghapus data pelanggaran lama beserta file medianya.
 func (h *Handler) handleCleanup(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", 405)

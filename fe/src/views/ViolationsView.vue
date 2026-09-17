@@ -13,7 +13,20 @@ const violations = ref<any[]>([]);
 const statusFilter = ref("");
 const searchPlate = ref("");
 const isLoading = ref(false);
+const isSending = ref(false);
+const sendingId = ref<number | null>(null);
 const notice = ref("");
+const noticeType = ref<"success" | "error">("error");
+
+function setNotice(text: string, type: "success" | "error" = "error") {
+  notice.value = text;
+  noticeType.value = type;
+  if (type === "success") {
+    setTimeout(() => {
+      if (notice.value === text) notice.value = "";
+    }, 8000);
+  }
+}
 
 const page = ref(1);
 const perPage = 20;
@@ -60,6 +73,35 @@ function changeStatus() {
   loadViolations();
 }
 
+async function handleSendPending() {
+  isSending.value = true;
+  try {
+    const res = await api.sendPending(500);
+    setNotice(
+      `Pengiriman selesai: ${res.sent} terkirim, ${res.failed} gagal, ${res.retry} akan dicoba ulang, ${res.skipped} dilewati (${res.batches} batch).`,
+      "success"
+    );
+    await loadViolations();
+  } catch (e: any) {
+    setNotice("Gagal mengirim antrean: " + e.message, "error");
+  } finally {
+    isSending.value = false;
+  }
+}
+
+async function handleSendOne(v: any) {
+  sendingId.value = v.id;
+  try {
+    const res = await api.sendViolation(v.id);
+    setNotice(`Pelanggaran #${v.id} berhasil dikirim ke Polantas.`, "success");
+    await loadViolations();
+  } catch (e: any) {
+    setNotice(`Gagal mengirim pelanggaran #${v.id}: ` + e.message, "error");
+  } finally {
+    sendingId.value = null;
+  }
+}
+
 function prevPage() {
   if (page.value > 1) {
     page.value--;
@@ -86,20 +128,39 @@ onMounted(loadViolations);
         <p class="text-xs text-slate-400">Antrean rekaman pelanggaran kendaraan dan status pengiriman ke Korlantas Polri</p>
       </div>
 
-      <button
-        @click="loadViolations"
-        class="bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 dark:bg-slate-800 dark:hover:bg-slate-700 dark:text-slate-300 dark:border-slate-700 text-xs py-2 px-3.5 rounded-lg transition flex items-center gap-2 self-start sm:self-auto cursor-pointer shadow-2xs font-medium"
-        title="Segarkan Data"
-      >
-        <i :class="['fa-solid fa-rotate', isLoading ? 'fa-spin' : '']"></i>
-        <span>Segarkan</span>
-      </button>
+      <div class="flex items-center gap-2.5 self-start sm:self-auto">
+        <button
+          @click="handleSendPending"
+          :disabled="isSending"
+          class="bg-blue-600 hover:bg-blue-500 text-white text-xs py-2 px-3.5 rounded-lg transition flex items-center gap-2 cursor-pointer shadow-sm font-semibold disabled:opacity-50"
+          title="Kirim semua antrean pending ke Polantas sekarang"
+        >
+          <i :class="['fa-solid', isSending ? 'fa-circle-notch fa-spin' : 'fa-paper-plane']"></i>
+          <span>{{ isSending ? "Mengirim..." : "Kirim Antrean ke Polantas" }}</span>
+        </button>
+
+        <button
+          @click="loadViolations"
+          class="bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 dark:bg-slate-800 dark:hover:bg-slate-700 dark:text-slate-300 dark:border-slate-700 text-xs py-2 px-3.5 rounded-lg transition flex items-center gap-2 cursor-pointer shadow-2xs font-medium"
+          title="Segarkan Data"
+        >
+          <i :class="['fa-solid fa-rotate', isLoading ? 'fa-spin' : '']"></i>
+          <span>Segarkan</span>
+        </button>
+      </div>
     </div>
 
     <!-- Alert -->
-    <div v-if="notice" class="p-3 bg-rose-950/60 border border-rose-800 text-rose-300 rounded text-xs flex items-center justify-between">
+    <div
+      v-if="notice"
+      :class="[
+        noticeType === 'success' ? 'bg-emerald-950/60 border-emerald-800 text-emerald-300' :
+        'bg-rose-950/60 border-rose-800 text-rose-300'
+      ]"
+      class="p-3 border rounded text-xs flex items-center justify-between"
+    >
       <div class="flex items-center gap-2">
-        <i class="fa-solid fa-circle-exclamation"></i>
+        <i :class="['fa-solid', noticeType === 'success' ? 'fa-circle-check text-emerald-400' : 'fa-circle-exclamation text-rose-400']"></i>
         <span>{{ notice }}</span>
       </div>
       <button @click="notice = ''" class="text-slate-400 hover:text-white">
@@ -202,6 +263,16 @@ onMounted(loadViolations);
                   ></i>
                   <span class="capitalize">{{ v.status }}</span>
                 </span>
+                <button
+                  v-if="v.status === 'failed'"
+                  @click.stop="handleSendOne(v)"
+                  :disabled="sendingId === v.id"
+                  class="ml-2 inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold border border-blue-800/40 text-blue-400 bg-blue-950/40 hover:bg-blue-900/40 transition cursor-pointer disabled:opacity-50"
+                  title="Kirim ulang pelanggaran ini ke Polantas"
+                >
+                  <i :class="['fa-solid', sendingId === v.id ? 'fa-circle-notch fa-spin' : 'fa-paper-plane']"></i>
+                  <span>Kirim</span>
+                </button>
               </td>
               <td class="py-3 px-4 font-mono text-slate-400">
                 <span v-if="v.response_status" class="bg-slate-950 px-2 py-0.5 rounded border border-slate-800">

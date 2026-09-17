@@ -14,6 +14,8 @@ export const api = {
   dashboardStats: () => req("/dashboard/stats"),
   syncLogs: (limit = 30) => req("/sync-logs?limit=" + limit),
   syncAll: () => req("/sync-all", { method: "POST", body: "{}" }),
+  sendPending: (limit = 200) => req(`/send?limit=${limit}`, { method: "POST", body: "{}" }),
+  sendViolation: (id: number) => req(`/violations/${id}/send`, { method: "POST", body: "{}" }),
   cleanup: (days = 2) => req("/cleanup?days=" + days, { method: "POST", body: "{}" }),
   clients: () => req("/clients"),
   createClient: (b: any) => req("/clients", { method: "POST", body: JSON.stringify(b) }),

@@ -113,7 +113,7 @@ func (d *Dispatcher) process(j Job) {
 	}
 	isCrossDay := v.CreatedAt.Year() != now.Year() || v.CreatedAt.YearDay() != now.YearDay()
 	if isCrossDay || now.Sub(v.CreatedAt) > maxDelay {
-		_ = d.repo.MarkFailed(j.ViolationID, "expired: delay melebihi batas 3 menit atau beda hari kalender")
+		_ = d.repo.MarkFailed(j.ViolationID, "expired: delay melebihi batas atau beda hari kalender")
 		d.logDelivery(v, "expired", v.Attempts, 0, 0, "delay melebihi batas atau beda hari", 0)
 		return
 	}
@@ -124,14 +124,80 @@ func (d *Dispatcher) process(j Job) {
 		d.logDelivery(v, "failed", v.Attempts, 0, 0, "client not found", 0)
 		return
 	}
-
-	if c.AuthToken == "" {
-		if lr, e := d.etle.Login(c); e == nil {
-			c.AuthToken = lr.AccessToken
-			_ = d.repo.SetTokens(c.ID, lr.AccessToken, lr.RefreshToken)
-		}
+	if !c.IsActive {
+		_ = d.repo.MarkFailed(j.ViolationID, "client tidak aktif — dilewati")
+		d.logDelivery(v, "skipped_inactive", v.Attempts, 0, 0, "client tidak aktif", 0)
+		return
 	}
 
+	item, reason := d.prepareItem(v)
+	if reason != "" {
+		_ = d.repo.MarkFailed(j.ViolationID, "dilewati: "+reason+". Tidak dikirim ke ETLE.")
+		d.logDelivery(v, "skipped_unknown", v.Attempts, 0, 0, reason, 0)
+		return
+	}
+
+	start := time.Now()
+	resp, err := d.deliver(c, []ViolationItem{item})
+	dur := time.Since(start)
+	if err != nil {
+		httpStatus := 0
+		if apiErr, ok := err.(*APIError); ok {
+			httpStatus = apiErr.StatusCode
+		}
+		_ = d.repo.FailOrRetry(j.ViolationID, v.Attempts, d.maxRetry, err.Error())
+		d.logDelivery(v, "failed", v.Attempts+1, httpStatus, 0, err.Error(), dur)
+		return
+	}
+	_ = d.repo.MarkSent(j.ViolationID, resp.Status)
+	d.logDelivery(v, "sent", v.Attempts+1, 200, resp.Status, "", dur)
+}
+
+// maxBatchSize = jumlah maksimal item pelanggaran dalam satu request /violation/insert.
+const maxBatchSize = 50
+
+// SendSummary merangkum hasil satu kali pengiriman (batch atau per-item).
+type SendSummary struct {
+	Requested int `json:"requested"`
+	Claimed   int `json:"claimed"`
+	Sent      int `json:"sent"`
+	Failed    int `json:"failed"`
+	Skipped   int `json:"skipped"`
+	Retry     int `json:"retry"`
+	Batches   int `json:"batches"`
+}
+
+// ensureFreshToken memastikan klien punya access token yang belum kedaluwarsa;
+// bila kosong/expired, login ulang on-the-fly dan simpan token barunya.
+func (d *Dispatcher) ensureFreshToken(c *Client) {
+	if c.AuthToken != "" && !TokenExpired(c.AuthToken) {
+		return
+	}
+	if lr, e := d.etle.Login(c); e == nil {
+		c.AuthToken = lr.AccessToken
+		_ = d.repo.SetTokens(c.ID, lr.AccessToken, lr.RefreshToken)
+	}
+}
+
+// deliver mengirim payload ke ETLE. Bila ETLE membalas token kedaluwarsa
+// (401/403 jwt expired), login ulang lalu kirim ulang sekali.
+func (d *Dispatcher) deliver(c *Client, items []ViolationItem) (*SendResponse, error) {
+	d.ensureFreshToken(c)
+	resp, err := d.etle.SendViolation(c, ViolationPayload{Datas: items})
+	if err != nil && IsTokenExpired(err) {
+		if lr, e := d.etle.Login(c); e == nil {
+			_ = d.repo.SetTokens(c.ID, lr.AccessToken, lr.RefreshToken)
+			c.AuthToken = lr.AccessToken
+			resp, err = d.etle.SendViolation(c, ViolationPayload{Datas: items})
+		}
+	}
+	return resp, err
+}
+
+// prepareItem membangun payload ETLE dari satu violation: mapping kode master,
+// URL media snapshot, dan lokasi dari kamera. Mengembalikan alasan (non-kosong)
+// bila violation harus dilewati.
+func (d *Dispatcher) prepareItem(v *Violation) (ViolationItem, string) {
 	item := ViolationItem{
 		DeviceName:      v.DeviceName,
 		Plate:           v.Plate,
@@ -163,34 +229,184 @@ func (d *Dispatcher) process(j Job) {
 	// antivirus: jangan kirim row dengan plat tidak valid ke ETLE
 	plate := strings.TrimSpace(item.Plate)
 	if plate == "" || strings.EqualFold(plate, "unknown") {
-		_ = d.repo.MarkFailed(j.ViolationID, "dilewati: plat nomor tidak terbaca (unknown). Tidak dikirim ke ETLE.")
-		d.logDelivery(v, "skipped_unknown", v.Attempts, 0, 0, "plat nomor tidak terbaca (unknown)", 0)
-		return
+		return item, "plat nomor tidak terbaca (unknown)"
 	}
-	start := time.Now()
-	resp, err := d.etle.SendViolation(c, ViolationPayload{Datas: []ViolationItem{item}})
+	return item, ""
+}
+
+// SendPending mengirim antrean pending ke ETLE secara batch (beberapa pelanggaran
+// per satu request). Setiap row di-claim atomik sehingga aman berjalan bersamaan
+// dengan worker/reaper. Bila satu batch gagal, item dikirim ulang satu-per-satu
+// untuk mengisolasi error tanpa menggagalkan seluruh batch.
+func (d *Dispatcher) SendPending(limit int) (*SendSummary, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	if limit > 2000 {
+		limit = 2000
+	}
+	rows, err := d.repo.PendingViolations(limit, d.maxRetry, d.maxDelayMinutes)
 	if err != nil {
-		// token expired (401) -> login ulang lalu retry sekali
-		if apiErr, ok := err.(*APIError); ok && apiErr.StatusCode == 401 {
-			if lr, e := d.etle.Login(c); e == nil {
-				_ = d.repo.SetTokens(c.ID, lr.AccessToken, lr.RefreshToken)
-				c.AuthToken = lr.AccessToken
-				resp, err = d.etle.SendViolation(c, ViolationPayload{Datas: []ViolationItem{item}})
+		return nil, err
+	}
+	s := &SendSummary{Requested: len(rows)}
+	now := time.Now()
+	maxDelay := time.Duration(d.maxDelayMinutes) * time.Minute
+	if maxDelay <= 0 {
+		maxDelay = 3 * time.Minute
+	}
+
+	grouped := map[int64][]*Violation{}
+	for i := range rows {
+		v := &rows[i]
+		claimed, e := d.repo.ClaimViolation(v.ID)
+		if e != nil || !claimed {
+			continue
+		}
+		s.Claimed++
+		isCrossDay := v.CreatedAt.Year() != now.Year() || v.CreatedAt.YearDay() != now.YearDay()
+		if isCrossDay || now.Sub(v.CreatedAt) > maxDelay {
+			_ = d.repo.MarkFailed(v.ID, "expired: delay melebihi batas atau beda hari kalender")
+			d.logDelivery(v, "expired", v.Attempts, 0, 0, "delay melebihi batas atau beda hari", 0)
+			s.Failed++
+			continue
+		}
+		grouped[v.ClientID] = append(grouped[v.ClientID], v)
+	}
+	d.sendGrouped(grouped, s)
+	return s, nil
+}
+
+// SendOne mengirim satu violation tertentu sekarang (on-the-fly). Row berstatus
+// failed akan di-requeue lebih dulu agar bisa dicoba ulang manual.
+func (d *Dispatcher) SendOne(id int64) (*SendSummary, error) {
+	v, err := d.repo.GetViolation(id)
+	if err != nil {
+		return nil, err
+	}
+	if v == nil {
+		return nil, fmt.Errorf("violation id %d tidak ditemukan", id)
+	}
+	s := &SendSummary{Requested: 1}
+	if v.Status == "sent" {
+		return s, fmt.Errorf("violation id %d sudah terkirim", id)
+	}
+	if v.Status == "failed" {
+		_ = d.repo.RequeueViolation(id)
+	}
+	claimed, err := d.repo.ClaimViolation(id)
+	if err != nil {
+		return s, err
+	}
+	if !claimed {
+		return s, fmt.Errorf("violation id %d sedang diproses atau tidak pending", id)
+	}
+	s.Claimed = 1
+
+	now := time.Now()
+	maxDelay := time.Duration(d.maxDelayMinutes) * time.Minute
+	if maxDelay <= 0 {
+		maxDelay = 3 * time.Minute
+	}
+	isCrossDay := v.CreatedAt.Year() != now.Year() || v.CreatedAt.YearDay() != now.YearDay()
+	if isCrossDay || now.Sub(v.CreatedAt) > maxDelay {
+		_ = d.repo.MarkFailed(id, "expired: delay melebihi batas atau beda hari kalender")
+		d.logDelivery(v, "expired", v.Attempts, 0, 0, "delay melebihi batas atau beda hari", 0)
+		s.Failed++
+		return s, nil
+	}
+	d.sendGrouped(map[int64][]*Violation{v.ClientID: {v}}, s)
+	return s, nil
+}
+
+// sendGrouped mengirim violation yang sudah dikelompokkan per klien. Satu request
+// ke ETLE hanya memuat violation dari satu klien (token berbeda per klien).
+func (d *Dispatcher) sendGrouped(grouped map[int64][]*Violation, s *SendSummary) {
+	for clientID, vs := range grouped {
+		c, e := d.repo.GetClient(clientID)
+		if e != nil || c == nil {
+			for _, v := range vs {
+				_ = d.repo.MarkFailed(v.ID, "client not found")
+				d.logDelivery(v, "failed", v.Attempts, 0, 0, "client not found", 0)
+				s.Failed++
+			}
+			continue
+		}
+		if !c.IsActive {
+			for _, v := range vs {
+				_ = d.repo.MarkFailed(v.ID, "client tidak aktif — dilewati")
+				d.logDelivery(v, "skipped_inactive", v.Attempts, 0, 0, "client tidak aktif", 0)
+				s.Skipped++
+			}
+			continue
+		}
+
+		type readyItem struct {
+			v    *Violation
+			item ViolationItem
+		}
+		ready := make([]readyItem, 0, len(vs))
+		for _, v := range vs {
+			it, reason := d.prepareItem(v)
+			if reason != "" {
+				_ = d.repo.MarkFailed(v.ID, "dilewati: "+reason+". Tidak dikirim ke ETLE.")
+				d.logDelivery(v, "skipped_unknown", v.Attempts, 0, 0, reason, 0)
+				s.Skipped++
+				continue
+			}
+			ready = append(ready, readyItem{v, it})
+		}
+
+		for start := 0; start < len(ready); start += maxBatchSize {
+			end := start + maxBatchSize
+			if end > len(ready) {
+				end = len(ready)
+			}
+			chunk := ready[start:end]
+			payload := make([]ViolationItem, len(chunk))
+			for i, r := range chunk {
+				payload[i] = r.item
+			}
+
+			begin := time.Now()
+			resp, err := d.deliver(c, payload)
+			dur := time.Since(begin)
+			s.Batches++
+			if err == nil {
+				for _, r := range chunk {
+					_ = d.repo.MarkSent(r.v.ID, resp.Status)
+					d.logDelivery(r.v, "sent", r.v.Attempts+1, 200, resp.Status, "", dur)
+					s.Sent++
+				}
+				continue
+			}
+
+			// Batch gagal -> isolasi per item agar satu data bermasalah tidak
+			// menggagalkan data lain di batch yang sama.
+			for _, r := range chunk {
+				b2 := time.Now()
+				resp2, err2 := d.deliver(c, []ViolationItem{r.item})
+				d2 := time.Since(b2)
+				if err2 == nil {
+					_ = d.repo.MarkSent(r.v.ID, resp2.Status)
+					d.logDelivery(r.v, "sent", r.v.Attempts+1, 200, resp2.Status, "", d2)
+					s.Sent++
+					continue
+				}
+				httpStatus := 0
+				if apiErr, ok := err2.(*APIError); ok {
+					httpStatus = apiErr.StatusCode
+				}
+				_ = d.repo.FailOrRetry(r.v.ID, r.v.Attempts, d.maxRetry, err2.Error())
+				d.logDelivery(r.v, "failed", r.v.Attempts+1, httpStatus, 0, err2.Error(), d2)
+				if r.v.Attempts+1 >= d.maxRetry {
+					s.Failed++
+				} else {
+					s.Retry++
+				}
 			}
 		}
 	}
-	dur := time.Since(start)
-	if err != nil {
-		httpStatus := 0
-		if apiErr, ok := err.(*APIError); ok {
-			httpStatus = apiErr.StatusCode
-		}
-		_ = d.repo.FailOrRetry(j.ViolationID, v.Attempts, d.maxRetry, err.Error())
-		d.logDelivery(v, "failed", v.Attempts+1, httpStatus, 0, err.Error(), dur)
-		return
-	}
-	_ = d.repo.MarkSent(j.ViolationID, resp.Status)
-	d.logDelivery(v, "sent", v.Attempts+1, 200, resp.Status, "", dur)
 }
 
 func (d *Dispatcher) reaper() {

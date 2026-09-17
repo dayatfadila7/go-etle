@@ -325,17 +325,19 @@ func (r *Repository) PendingViolations(limit, maxRetry, maxDelayMinutes int) ([]
 		maxDelayMinutes = 3
 	}
 	rows, err := r.db.Query(
-		`SELECT id, client_id, COALESCE(camera_id,0), device_name, plate, COALESCE(plate_color,''),
-			COALESCE(plate_image_url,''), COALESCE(vehicle_type,''), COALESCE(vehicle_color,''),
-			COALESCE(vehicle_image_url,''), COALESCE(video_url,''), violation_code, violation_name,
-			COALESCE(location_name,''), COALESCE(capture_time,0), status, COALESCE(response_status,0),
-			attempts, COALESCE(error_message, ''), created_at
-		 FROM violations
-		 WHERE status='pending'
-		   AND attempts < $1
-		   AND created_at >= CURRENT_DATE
-		   AND created_at >= NOW() - ($2 * INTERVAL '1 minute')
-		 ORDER BY id LIMIT $3`,
+		`SELECT v.id, v.client_id, COALESCE(v.camera_id,0), v.device_name, v.plate, COALESCE(v.plate_color,''),
+			COALESCE(v.plate_image_url,''), COALESCE(v.vehicle_type,''), COALESCE(v.vehicle_color,''),
+			COALESCE(v.vehicle_image_url,''), COALESCE(v.video_url,''), v.violation_code, v.violation_name,
+			COALESCE(v.location_name,''), COALESCE(v.capture_time,0), v.status, COALESCE(v.response_status,0),
+			v.attempts, COALESCE(v.error_message, ''), v.created_at
+		 FROM violations v
+		 JOIN clients c ON c.id = v.client_id
+		 WHERE v.status='pending'
+		   AND v.attempts < $1
+		   AND c.is_active = true
+		   AND v.created_at >= CURRENT_DATE
+		   AND v.created_at >= NOW() - ($2 * INTERVAL '1 minute')
+		 ORDER BY v.id LIMIT $3`,
 		maxRetry, maxDelayMinutes, limit,
 	)
 	if err != nil {
@@ -357,6 +359,13 @@ func (r *Repository) PendingViolations(limit, maxRetry, maxDelayMinutes int) ([]
 
 func (r *Repository) MarkFailed(id int64, errMsg string) error {
 	_, err := r.db.Exec(`UPDATE violations SET status='failed', error_message=$1, updated_at=NOW() WHERE id=$2`, errMsg, id)
+	return err
+}
+
+// RequeueViolation mengembalikan satu violation ke antrean pending (attempts=0)
+// agar bisa dikirim ulang, khususnya setelah kegagalan token/delay.
+func (r *Repository) RequeueViolation(id int64) error {
+	_, err := r.db.Exec(`UPDATE violations SET status='pending', attempts=0, error_message=NULL, updated_at=NOW() WHERE id=$1 AND status IN ('failed','pending')`, id)
 	return err
 }
 

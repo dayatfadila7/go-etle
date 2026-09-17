@@ -18,6 +18,7 @@ const syncLogs = ref<any[]>([]);
 const recentViolations = ref<any[]>([]);
 const isSyncing = ref(false);
 const isCleaning = ref(false);
+const showCleanupConfirm = ref(false);
 const alertMessage = ref("");
 const alertType = ref<"success" | "error" | "info">("info");
 
@@ -61,7 +62,7 @@ async function handleSyncAll() {
 }
 
 async function handleCleanup() {
-  if (!confirm("Konfirmasi: Hapus data pelanggaran yang berumur lebih dari 2 hari?")) return;
+  showCleanupConfirm.value = false;
   isCleaning.value = true;
   try {
     const res = await api.cleanup(2);
@@ -132,7 +133,7 @@ onMounted(loadDashboardData);
 
         <!-- Cleanup Button -->
         <button
-          @click="handleCleanup"
+          @click="showCleanupConfirm = true"
           :disabled="isCleaning"
           class="bg-slate-800 hover:bg-rose-950/50 hover:text-rose-300 hover:border-rose-700/50 text-slate-300 border border-slate-700 text-xs font-medium py-2 px-3 rounded transition flex items-center gap-2 cursor-pointer"
         >
@@ -327,5 +328,53 @@ onMounted(loadDashboardData);
         </div>
       </div>
     </div>
+
+    <!-- Modal Konfirmasi Hapus Data Lama -->
+    <Teleport to="body">
+      <div
+        v-if="showCleanupConfirm"
+        class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs transition-opacity"
+      >
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl max-w-sm w-full p-6 text-slate-100">
+          <div class="flex items-center gap-3.5 mb-4">
+            <div class="w-11 h-11 rounded-xl bg-rose-500/10 border border-rose-500/30 flex items-center justify-center text-rose-500 shrink-0">
+              <i class="fa-solid fa-trash-can text-lg"></i>
+            </div>
+            <div>
+              <h3 class="text-sm font-bold text-white tracking-wide">Hapus Data Lama</h3>
+              <p class="text-xs text-slate-400">Konfirmasi Pembersihan Data</p>
+            </div>
+          </div>
+
+          <p class="text-xs text-slate-300 mb-3 leading-relaxed">
+            Apakah Anda yakin ingin menghapus semua data pelanggaran yang berumur lebih dari
+            <strong class="text-white">2 hari</strong>?
+          </p>
+          <div class="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-500 text-[11px] mb-5">
+            <i class="fa-solid fa-circle-info mr-1"></i>
+            <span>Data beserta file media (XML/gambar) yang lewat masa retensi akan dihapus permanen.</span>
+          </div>
+
+          <div class="flex items-center justify-end gap-2.5">
+            <button
+              @click="showCleanupConfirm = false"
+              :disabled="isCleaning"
+              class="px-4 py-2 text-xs font-medium text-slate-700 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-lg transition cursor-pointer"
+            >
+              Batal
+            </button>
+            <button
+              @click="handleCleanup"
+              :disabled="isCleaning"
+              class="px-4 py-2 text-xs font-semibold text-white bg-rose-600 hover:bg-rose-500 rounded-lg transition flex items-center gap-2 cursor-pointer shadow-sm disabled:opacity-50"
+            >
+              <i v-if="isCleaning" class="fa-solid fa-circle-notch fa-spin text-xs"></i>
+              <i v-else class="fa-solid fa-trash text-xs"></i>
+              <span>{{ isCleaning ? "Menghapus..." : "Ya, Hapus Data" }}</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
